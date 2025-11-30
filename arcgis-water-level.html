@@ -1,0 +1,172 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>ArcGIS Gauge – Average Water Level (Last 2 Hours)</title>
+  <style>
+    :root {
+      color-scheme: light dark;
+    }
+    body {
+      font-family: system-ui, -apple-system, Segoe UI, Roboto, Ubuntu, Cantarell, 'Helvetica Neue', Arial, sans-serif;
+      margin: 0;
+      padding: 0;
+      background: #f7f7f8;
+      color: #111;
+    }
+    header {
+      background: #0b5fff;
+      color: white;
+      padding: 1rem 1.25rem;
+    }
+    main {
+      padding: 1rem 1.25rem 2rem;
+      max-width: 1000px;
+      margin: 0 auto;
+    }
+    h1 { font-size: 1.25rem; margin: 0; }
+    .controls { display: flex; gap: .75rem; align-items: center; flex-wrap: wrap; margin-top: .75rem; }
+    .url-input { width: 100%; max-width: 1000px; }
+    input[type="text"] { width: 100%; padding: .5rem .75rem; font-size: .95rem; }
+    button { padding: .5rem .75rem; font-size: .95rem; cursor: pointer; border: 1px solid #0b5fff; background: #0b5fff; color: white; border-radius: .4rem; }
+    button.secondary { background: white; color: #0b5fff; }
+    .meta { margin: .5rem 0 1rem; color: #555; }
+    .status { margin-top: .5rem; font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, 'Liberation Mono', 'Courier New', monospace; }
+    table { width: 100%; border-collapse: collapse; background: white; }
+    th, td { border: 1px solid #ddd; padding: .5rem .6rem; text-align: left; }
+    th { background: #f0f4ff; }
+    .error { color: #b00020; }
+    footer { margin-top: 2rem; color: #666; font-size: .9rem; }
+    code { background: #eef2ff; padding: 0 .25rem; border-radius: .25rem; }
+  </style>
+</head>
+<body>
+  <header>
+    <h1>ArcGIS – Average Water Level (Last 2 Hours)</h1>
+    <div class="meta">Refreshes automatically every 15 minutes. You can edit the URL and refresh manually.</div>
+    <div class="controls">
+      <div class="url-input">
+        <input id="endpoint" type="text" value="https://services3.arcgis.com/J7ZFXmR8rSmQ3FGf/arcgis/rest/services/gauges_2_view/FeatureServer/0/query?f=json&where=CreationDate%20BETWEEN%20(CURRENT_TIMESTAMP%20-%20INTERVAL%20'2'%20HOUR)%20AND%20CURRENT_TIMESTAMP%20AND%20gauge%3D%27Nagalagam%20Street%27&outFields=*&returnGeometry=false&resultType=standard&outStatistics=%5B%7B%22onStatisticField%22%3A%22water_level%22%2C%22outStatisticFieldName%22%3A%22AVG_WATER_LEVEL%22%2C%22statisticType%22%3A%22avg%22%7D%5D" />
+      </div>
+      <button id="refreshBtn" class="secondary">Refresh now</button>
+    </div>
+    <div class="status" id="status">Idle.</div>
+  </header>
+
+  <main>
+    <section>
+      <h2>Response Table</h2>
+      <div id="tableContainer">Loading…</div>
+    </section>
+
+    <footer>
+      <p><strong>Tip:</strong> If your browser blocks network requests from a local file (CORS), run a tiny local web server (e.g., <code>python -m http.server</code>) and open this page via <code>http://localhost:8000</code>.</p>
+    </footer>
+  </main>
+
+  <script>
+    const statusEl = document.getElementById('status');
+    const tableContainer = document.getElementById('tableContainer');
+    const endpointInput = document.getElementById('endpoint');
+    const refreshBtn = document.getElementById('refreshBtn');
+
+    const REFRESH_MS = 15 * 60 * 1000; // 15 minutes
+    let timerId = null;
+
+    function fmtDate(d) {
+      return new Date(d).toLocaleString();
+    }
+
+    function setStatus(msg, isError=false) {
+      statusEl.textContent = msg;
+      statusEl.className = isError ? 'status error' : 'status';
+    }
+
+    function buildTableFromFeatures(features) {
+      if (!features || !Array.isArray(features) || features.length === 0) {
+        tableContainer.innerHTML = '<p>No rows returned.</p>';
+        return;
+      }
+      // Collect all attribute keys
+      const columns = Array.from(features.reduce((set, f) => {
+        const attrs = f.attributes || {};
+        Object.keys(attrs).forEach(k => set.add(k));
+        return set;
+      }, new Set()));
+
+      // Build table
+      const table = document.createElement('table');
+      const thead = document.createElement('thead');
+      const tbody = document.createElement('tbody');
+
+      const headRow = document.createElement('tr');
+      columns.forEach(col => {
+        const th = document.createElement('th');
+        th.textContent = col;
+        headRow.appendChild(th);
+      });
+      thead.appendChild(headRow);
+
+      features.forEach(f => {
+        const tr = document.createElement('tr');
+        const attrs = f.attributes || {};
+        columns.forEach(col => {
+          const td = document.createElement('td');
+          let val = attrs[col];
+          if (val === null || val === undefined) val = '';
+          // If epoch milliseconds, render human date too
+          if (typeof val === 'number' && col.toLowerCase().includes('date') && val > 1e11) {
+            td.textContent = `${val} ( ${new Date(val).toLocaleString()} )`;
+          } else {
+            td.textContent = val;
+          }
+          tr.appendChild(td);
+        });
+        tbody.appendChild(tr);
+      });
+
+      table.appendChild(thead);
+      table.appendChild(tbody);
+      tableContainer.innerHTML = '';
+      tableContainer.appendChild(table);
+    }
+
+    async function fetchAndRender() {
+      const url = endpointInput.value.trim();
+      if (!url) {
+        setStatus('Please enter a valid endpoint URL.', true);
+        return;
+      }
+      setStatus('Fetching…');
+      try {
+        const res = await fetch(url, { method: 'GET' });
+        if (!res.ok) throw new Error(`HTTP ${res.status}`);
+        const data = await res.json();
+        // Expecting ArcGIS FeatureServer JSON: { features: [{ attributes: {...} }, ...] }
+        const features = data.features || [];
+        buildTableFromFeatures(features);
+        const now = new Date();
+        setStatus(`Last updated: ${fmtDate(now)} | ${features.length} row(s)`);
+      } catch (err) {
+        console.error(err);
+        setStatus(`Error: ${err.message}`, true);
+        tableContainer.innerHTML = '<p class="error">Failed to load data.</p>';
+      }
+    }
+
+    function startAutoRefresh() {
+      if (timerId) clearInterval(timerId);
+      timerId = setInterval(fetchAndRender, REFRESH_MS);
+    }
+
+    refreshBtn.addEventListener('click', () => {
+      fetchAndRender();
+    });
+
+    // Initial load + timer
+    fetchAndRender();
+    startAutoRefresh();
+  </script>
+</body>
+</html>
