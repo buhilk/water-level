@@ -1,0 +1,211 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>ArcGIS Gauge – Average Water Level (Last 2 Hours)</title>
+  <style>
+    :root { color-scheme: light dark; }
+    body { font-family: system-ui, -apple-system, Segoe UI, Roboto, Ubuntu, Cantarell, 'Helvetica Neue', Arial, sans-serif; margin: 0; padding: 0; background: #f7f7f8; color: #111; }
+    header { background: #0b5fff; color: white; padding: 1rem 1.25rem; }
+    main { padding: 1rem 1.25rem 2rem; max-width: 1100px; margin: 0 auto; }
+    h1 { font-size: 1.25rem; margin: 0; }
+    .controls { display: flex; gap: .75rem; align-items: center; flex-wrap: wrap; margin-top: .75rem; }
+    .row { display: flex; gap: .75rem; align-items: center; flex-wrap: wrap; margin-top: .5rem; }
+    .url-input { width: 100%; max-width: 1100px; }
+    input[type="text"], select { padding: .5rem .75rem; font-size: .95rem; }
+    input[type="text"] { width: 100%; }
+    button { padding: .5rem .75rem; font-size: .95rem; cursor: pointer; border: 1px solid #0b5fff; background: #0b5fff; color: white; border-radius: .4rem; }
+    button.secondary { background: white; color: #0b5fff; }
+    .meta { margin: .5rem 0 1rem; color: #dbe4ff; }
+    .status { margin-top: .5rem; font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, 'Liberation Mono', 'Courier New', monospace; }
+    table { width: 100%; border-collapse: collapse; background: white; }
+    th, td { border: 1px solid #ddd; padding: .5rem .6rem; text-align: left; vertical-align: top; }
+    th { background: #f0f4ff; }
+    .error { color: #b00020; }
+    footer { margin-top: 2rem; color: #666; font-size: .9rem; }
+    code { background: #eef2ff; padding: 0 .25rem; border-radius: .25rem; }
+    .badge { display:inline-block; padding:.1rem .4rem; border-radius:.35rem; background:#eef2ff; color:#1939b7; font-size:.8rem; }
+  </style>
+</head>
+<body>
+  <header>
+    <h1>ArcGIS – Average Water Level (Last 2 Hours)</h1>
+    <div class="meta">Auto-refresh every 15 minutes • Displays original values and converted <strong>feet & inches</strong>.</div>
+    <div class="controls">
+      <div class="url-input">
+        <input id="endpoint" type="text" value="https://services3.arcgis.com/J7ZFXmR8rSmQ3FGf/arcgis/rest/services/gauges_2_view/FeatureServer/0/query?f=json&where=CreationDate%20BETWEEN%20(CURRENT_TIMESTAMP%20-%20INTERVAL%20'2'%20HOUR)%20AND%20CURRENT_TIMESTAMP%20AND%20gauge%3D%27Nagalagam%20Street%27&outFields=*&returnGeometry=false&resultType=standard&outStatistics=%5B%7B%22onStatisticField%22%3A%22water_level%22%2C%22outStatisticFieldName%22%3A%22AVG_WATER_LEVEL%22%2C%22statisticType%22%3A%22avg%22%7D%5D" />
+      </div>
+      <button id="refreshBtn" class="secondary">Refresh now</button>
+    </div>
+    <div class="row">
+      <label for="inputUnit"><span class="badge">Input unit</span></label>
+      <select id="inputUnit">
+        <option value="feet" selected>Feet (decimal)</option>
+        <option value="meters">Meters</option>
+      </select>
+      <label for="precision"><span class="badge">Rounding</span></label>
+      <select id="precision">
+        <option value="0">0 (nearest inch)</option>
+        <option value="1" selected>1</option>
+        <option value="2">2</option>
+      </select>
+    </div>
+    <div class="status" id="status">Idle.</div>
+  </header>
+
+  <main>
+    <section>
+      <h2>Response Table</h2>
+      <p>The table adds a <strong>Converted (ft/in)</strong> column for numeric water level fields such as <code>water_level</code> or <code>AVG_WATER_LEVEL</code>.</p>
+      <div id="tableContainer">Loading…</div>
+    </section>
+
+    <footer>
+      <p><strong>Tip:</strong> If your browser blocks network requests from a local file (CORS), run a tiny local web server (e.g., <code>python -m http.server</code>) and open this page via <code>http://localhost:8000</code>.</p>
+    </footer>
+  </main>
+
+  <script>
+    const statusEl = document.getElementById('status');
+    const tableContainer = document.getElementById('tableContainer');
+    const endpointInput = document.getElementById('endpoint');
+    const refreshBtn = document.getElementById('refreshBtn');
+    const inputUnitSel = document.getElementById('inputUnit');
+    const precisionSel = document.getElementById('precision');
+
+    const REFRESH_MS = 15 * 60 * 1000; // 15 minutes
+    let timerId = null;
+
+    function fmtDate(d) { return new Date(d).toLocaleString(); }
+
+    function setStatus(msg, isError=false) {
+      statusEl.textContent = msg;
+      statusEl.className = isError ? 'status error' : 'status';
+    }
+
+    // Convert decimal value to feet & inches string
+    // If inputUnit === 'feet', value is in decimal feet; if 'meters', convert to feet first.
+    function toFeetInches(value, inputUnit='feet', inchPrecision=1) {
+      if (value === null || value === undefined || isNaN(value)) return '';
+      let feetTotal = (inputUnit === 'meters') ? (value * 3.28084) : value; // meters to feet
+      const feet = Math.trunc(feetTotal);
+      const inchesRaw = (feetTotal - feet) * 12;
+      const factor = Math.pow(10, inchPrecision);
+      const inches = Math.round(inchesRaw * factor) / factor;
+      // If inches rounds to 12, carry over to feet
+      let adjFeet = feet;
+      let adjInches = inches;
+      if (adjInches >= 12) { adjFeet += 1; adjInches -= 12; }
+      // Format inches respecting precision
+      const inchesStr = inchPrecision === 0 ? Math.round(adjInches).toString() : adjInches.toFixed(inchPrecision);
+      return `${adjFeet} ft ${inchesStr} in`;
+    }
+
+    function isWaterLevelFieldName(name) {
+      const n = (name || '').toLowerCase();
+      return n.includes('water') || n.includes('level') || n === 'avg_water_level' || n === 'water_level';
+    }
+
+    function buildTableFromFeatures(features) {
+      if (!features || !Array.isArray(features) || features.length === 0) {
+        tableContainer.innerHTML = '<p>No rows returned.</p>';
+        return;
+      }
+      const inchPrecision = parseInt(precisionSel.value, 10);
+      const inputUnit = inputUnitSel.value;
+
+      // Collect all attribute keys
+      const baseColumns = Array.from(features.reduce((set, f) => {
+        const attrs = f.attributes || {};
+        Object.keys(attrs).forEach(k => set.add(k));
+        return set;
+      }, new Set()));
+
+      // Determine which columns will get a converted ft/in companion
+      const convertTargets = baseColumns.filter(col => {
+        const sample = features[0]?.attributes?.[col];
+        return typeof sample === 'number' && isWaterLevelFieldName(col);
+      });
+
+      // Build table
+      const table = document.createElement('table');
+      const thead = document.createElement('thead');
+      const tbody = document.createElement('tbody');
+
+      const headRow = document.createElement('tr');
+      baseColumns.forEach(col => {
+        const th = document.createElement('th'); th.textContent = col; headRow.appendChild(th);
+        if (convertTargets.includes(col)) {
+          const th2 = document.createElement('th'); th2.textContent = `${col} (Converted ft/in)`; headRow.appendChild(th2);
+        }
+      });
+      thead.appendChild(headRow);
+
+      features.forEach(f => {
+        const tr = document.createElement('tr');
+        const attrs = f.attributes || {};
+        baseColumns.forEach(col => {
+          // Original value cell
+          const td = document.createElement('td');
+          let val = attrs[col];
+          if (val === null || val === undefined) val = '';
+          // Show epoch milliseconds as human date too
+          if (typeof val === 'number' && col.toLowerCase().includes('date') && val > 1e11) {
+            td.textContent = `${val} ( ${new Date(val).toLocaleString()} )`;
+          } else {
+            td.textContent = val;
+          }
+          tr.appendChild(td);
+
+          // Converted ft/in companion cell if applicable
+          if (convertTargets.includes(col)) {
+            const td2 = document.createElement('td');
+            const str = toFeetInches(attrs[col], inputUnit, inchPrecision);
+            td2.textContent = str;
+            tr.appendChild(td2);
+          }
+        });
+        tbody.appendChild(tr);
+      });
+
+      table.appendChild(thead);
+      table.appendChild(tbody);
+      tableContainer.innerHTML = '';
+      tableContainer.appendChild(table);
+    }
+
+    async function fetchAndRender() {
+      const url = endpointInput.value.trim();
+      if (!url) { setStatus('Please enter a valid endpoint URL.', true); return; }
+      setStatus('Fetching…');
+      try {
+        const res = await fetch(url, { method: 'GET' });
+        if (!res.ok) throw new Error(`HTTP ${res.status}`);
+        const data = await res.json();
+        const features = data.features || [];
+        buildTableFromFeatures(features);
+        const now = new Date();
+        setStatus(`Last updated: ${fmtDate(now)} | ${features.length} row(s)`);
+      } catch (err) {
+        console.error(err);
+        setStatus(`Error: ${err.message}`, true);
+        tableContainer.innerHTML = '<p class="error">Failed to load data.</p>';
+      }
+    }
+
+    function startAutoRefresh() {
+      if (timerId) clearInterval(timerId);
+      timerId = setInterval(fetchAndRender, REFRESH_MS);
+    }
+
+    refreshBtn.addEventListener('click', fetchAndRender);
+    inputUnitSel.addEventListener('change', fetchAndRender);
+    precisionSel.addEventListener('change', fetchAndRender);
+
+    // Initial load + timer
+    fetchAndRender();
+    startAutoRefresh();
+  </script>
+</body>
+</html>
